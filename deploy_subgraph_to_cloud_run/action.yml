@@ -1,0 +1,172 @@
+name: "Deploy Cloud Function"
+description: "Deploys Cloud Function"
+inputs:
+  gcp_admin_sa:
+    description: "GCP admin service account"
+    required: true
+  working_directory:
+    description: "Working directory for the Cloud Function"
+    required: true
+  service_name:
+    description: "service name name"
+    required: true
+  gcp_project:
+    description: "gcp project"
+    required: true
+  gcp_region:
+    description: "GCP region"
+    required: false
+    default: "us-central1"
+  min_instances:
+    description: "Minimum number of instances to launch"
+    default: 1
+  max_instances:
+    description: "Maximum number of instances to launch"
+    default: 100
+  vpc_connector:
+    description: "VPC Connector for private network communitation"
+    required: true
+  vpc_egress:
+    description: "VPC egress rules for service"
+    default: "private-ranges-only"
+  ingress:
+    description: "Ingress rules for service"
+    default: "all"
+  timeout:
+    description: "Timeout rules for service"
+    default: 300
+  memory:
+    description: "RAM size in Mb (e.g. 512, 1024, 2048)"
+    default: "512Mi"
+  cpu:
+    description: "Number of vCPU core"
+    default: 1
+  service_account:
+    description: "SA for Cloud Run service"
+    required: false
+    default: ""
+  cloud_build_yaml_path:
+    description: "path to cloudbuild.yaml (usually just 'cloudbuild.yaml' sitting in root of working directory)"
+    required: true
+  cloud_build_substitutions:
+    description: "cloudbuild.yaml substitutions (e.g. _SERVICE_NAME=my_service,_SERVICE_PORT=4006)"
+    required: true
+  service_port:
+    description: "service port"
+    required: true
+  env_vars:
+    description: 'env vars passed to --set-env-vars. Formatted like:  SERVICE_STAGE=staging,GCP_REGION=us-central1,etc..'
+    required: false
+    default: ""
+  labels:
+    description: 'Cloud Run Labels, Formatted like: environment=staging,service=my_service,etc..'
+    required: false
+    default: ""
+  secrets:
+    description: 'Cloud Run secrets to be passed, Formatted like: DB_USER=keplerapp-db-user:latest,DB_PASS=keplerapp-db-password:latest,etc..'
+    required: false
+    default: ""
+  add_cloudsql_instances:
+    description: 'cloudsql instances to add (i.e. keplerscience-staging:us-central1:kepler)'
+    required: false
+    default: ""
+  apollo_graph_ref:
+    description: 'apollo graph ref'
+    required: true
+  apollo_key:
+    description: 'apollo API key'
+    required: true
+  gql_routing_url:
+    description: 'routing URL for apollo'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+
+    - id: 'auth'
+      uses: 'google-github-actions/auth@v0'
+      with:
+        credentials_json: '${{ inputs.gcp_admin_sa }}'
+
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v0
+
+    - name: Translate some action inputs into CLI flags
+      id: translate_inputs
+      run: |-
+        echo "::set-output name=service_account::"
+        echo "::set-output name=add_cloudsql_instances::"
+        echo "::set-output name=env_vars::"
+        echo "::set-output name=labels::"
+        echo "::set-output name=secrets::"
+
+        if [ "${{ inputs.service_account }}" != "" ]; then
+          echo "::set-output name=service_account::--service-account=${{ inputs.service_account }}"
+        fi
+
+        if [ "${{ inputs.add_cloudsql_instances }}" != "" ]; then
+          echo "::set-output name=add_cloudsql_instances::--add-cloudsql-instances=${{ inputs.add_cloudsql_instances }}"
+        fi
+
+        if [ "${{ inputs.env_vars }}" != "" ]; then
+          echo "::set-output name=env_vars::--set-env-vars=${{ inputs.env_vars }}"
+        fi
+
+        if [ "${{ inputs.labels }}" != "" ]; then
+          echo "::set-output name=labels::--labels=${{ inputs.labels }}"
+        fi
+
+        if [ "${{ inputs.secrets }}" != "" ]; then
+          echo "::set-output name=secrets::--update-secrets=${{ inputs.secrets }}"
+        fi
+      shell: bash
+
+    - name: Build and deploy Cloud Run services
+      uses: keplerscience/actions/deploy_cloud_run_service@main
+      with:
+        gcp_admin_sa: ${{ inputs.gcp_admin_sa }}
+        working_directory: ${{ inputs.working_directory }}
+        service_name: ${{ inputs.service_name }}
+        service_port: ${{ inputs.service_port }}
+        gcp_project: ${{ inputs.gcp_project }}
+        gcp_region: ${{ inputs.gcp_region }}
+        min_instances: ${{ inputs.min_instances }}
+        max_instances: ${{ inputs.max_instances }}
+        vpc_connector: ${{ inputs.vpc_connector }}
+        vpc_egress: ${{ inputs.vpc_egress }}
+        ingress: ${{ inputs.ingress }}
+        timeout: ${{ inputs.timeout }}
+        memory: ${{ inputs.memory }}
+        cpu: ${{ inputs.cpu }}
+        service_account: ${{ inputs.service_account }}
+        cloud_build_yaml_path: ${{ inputs.cloud_build_yaml_path }}
+        cloud_build_substitutions: ${{ inputs.cloud_build_substitutions }}
+        env_vars: ${{ inputs.env_vars }}
+        add_cloudsql_instances: ${{ inputs.add_cloudsql_instances }}
+        secrets: ${{ inputs.secrets }}
+        labels: ${{ inputs.labels }}
+
+    - name: Get apollo args
+      id: apollo_args
+      run: |-
+        echo "GQL_ROUTING_URL=${{ inputs.gql_routing_url }}" >> ${GITHUB_ENV}
+        echo "APOLLO_KEY=${{ inputs.apollo_key }}" >> ${GITHUB_ENV}
+        echo "::set-output name=url::$(gcloud run services describe ${{ inputs.service_name }} --format='value(status.url)' --platform managed --region ${{ inputs.gcp_region }})"
+      shell: bash
+
+    - name: Install Rover
+      run: |-
+        curl -sSL https://rover.apollo.dev/nix/v0.1.0 | sh
+        # Add Rover to the $GITHUB_PATH so it can be used in another step
+        # https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions#adding-a-system-path
+        echo "$HOME/.rover/bin" >> $GITHUB_PATH
+      shell: bash
+
+    - name: Publish Schema to Studio using rover
+      run: |-
+        rover subgraph introspect ${{ steps.apollo_args.outputs.url }} | rover subgraph publish ${{ inputs.apollo_graph_ref }} --name ${{ inputs.service_name }} --schema - --routing-url ${{ steps.apollo_args.outputs.url }}
+      shell: bash

@@ -1,0 +1,163 @@
+name: "Deploy Cloud Function"
+description: "Deploys Cloud Function"
+inputs:
+  gen2:
+    description: "Flag to enable gen2 function"
+    default: false
+  gcp_admin_sa:
+    description: "GCP admin service account"
+    required: true
+  working_directory:
+    description: "Working directory for the Cloud Function"
+    required: true
+  function_name:
+    description: "Cloud Function name"
+    required: true
+  entry_point:
+    description: "Name of the function within main.py"
+    required: true
+  gcp_region:
+    description: "GCP region"
+    required: false
+    default: "us-central1"
+  runtime:
+    # Have only tested this action with python...
+    description: 'Cloud Function Runtime'
+    required: false
+    default: "python310"
+  service_account:
+    description: "SA for Cloud Function"
+    required: false
+    default: ""
+  env_vars:
+    description: 'env vars passed to --set-env-vars. Formatted like:  SERVICE_STAGE=staging,GCP_REGION=us-central1,etc..'
+    required: false
+    default: ""
+  labels:
+    description: 'Cloud Function Labels, Formatted like: environment=staging,service=my_service,etc..'
+    required: false
+    default: ""
+  trigger_type:
+    description: "trigger for cloud function (pubsub | http | gcs)"
+    required: true
+  pubsub_topic:
+    description: "Pubsub topic for Cloud Function to subscribe to (only used if trigger_type == 'pubsub')"
+    required: false
+    default: ""
+  gcs_bucket:
+    description: "GCS bucket to watch (only used if trigger_type == 'gcs')"
+    required: false
+    default: ""
+  vpc_connector:
+    description: "kepler vpc connector"
+    default: "kepler-vpc-connector"
+    required: false
+  retry:
+    description: 'Whether to have the Cloud Function retry requests. Default False'
+    required: false
+    default: false
+  timeout:
+    description: 'timeout in seconds. Cant be more than 540s'
+    required: false
+    default: ""
+  memory:
+    description: 'memory in MB. Cant be more than 8192MB'
+    required: false
+    default: ""
+  allow_unauthenticated:
+    description: 'allow anyone on the internet to invoke'
+    required: false
+    default: ""
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+
+    - id: 'auth'
+      uses: 'google-github-actions/auth@v0'
+      with:
+        credentials_json: '${{ inputs.gcp_admin_sa }}'
+
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v0
+
+    - name: Translate some action inputs into CLI flags
+      id: translate_inputs
+      run: |-
+        echo "::set-output name=service_account::"
+        echo "::set-output name=retry::"
+        echo "::set-output name=trigger::"
+        echo "::set-output name=env_vars::"
+        echo "::set-output name=labels::"
+        echo "::set-output name=timeout::"
+        echo "::set-output name=memory::"
+        echo "::set-output name=allow_unauthenticated::"
+
+        if [ "${{ inputs.service_account }}" != "" ]; then
+          echo "::set-output name=service_account::--service-account=${{ inputs.service_account }}"
+        fi
+
+        if [ "${{ inputs.gen2 }}" = "true" ]; then
+          echo "::set-output name=gen2::--gen2"
+        fi
+
+        if [ "${{ inputs.retry }}" = "true" ]; then
+          echo "::set-output name=retry::--retry"
+        fi
+        if [ "${{ inputs.trigger_type }}" = "http" ]; then
+          echo "::set-output name=trigger::--trigger-http"
+        elif [ "${{ inputs.trigger_type }}" = "pubsub" ]; then
+          echo "::set-output name=trigger::--trigger-topic ${{ inputs.pubsub_topic }}"
+        elif [ "${{ inputs.trigger_type }}" = "gcs" ]; then
+          echo "::set-output name=trigger::--trigger-bucket ${{ inputs.gcs_bucket }}"
+        else
+          echo "trigger_type needs to be either 'http', 'pubsub' or 'gcs'"
+          exit 1
+        fi
+
+
+        if [ "${{ inputs.env_vars }}" != "" ]; then
+          echo "::set-output name=env_vars::--set-env-vars=${{ inputs.env_vars }}"
+        fi
+
+
+        if [ "${{ inputs.timeout }}" != "" ]; then
+          echo "::set-output name=timeout::--timeout=${{ inputs.timeout }}"
+        fi
+
+
+        if [ "${{ inputs.memory }}" != "" ]; then
+          echo "::set-output name=memory::--memory=${{ inputs.memory }}"
+        fi
+
+        if [ "${{ inputs.labels }}" != "" ]; then
+          echo "::set-output name=labels::--update-labels=${{ inputs.labels }}"
+        fi
+
+        if [ "${{ inputs.allow_unauthenticated }}" = "true" ]; then
+          echo "::set-output name=allow_unauthenticated::--allow-unauthenticated"
+        fi
+      shell: bash
+
+
+    - name: Deploy Ingesting Cloud Function
+      working-directory: ${{ inputs.working_directory }}
+      run: |-
+        gcloud functions deploy ${{ inputs.function_name }} \
+          ${{ steps.translate_inputs.outputs.gen2 }} \
+          --entry-point=${{ inputs.entry_point }} \
+          ${{ steps.translate_inputs.outputs.allow_unauthenticated }} \
+          ${{ steps.translate_inputs.outputs.trigger }} \
+          --region=${{ inputs.gcp_region }} \
+          --runtime=${{ inputs.runtime }} \
+          --vpc-connector=kepler-vpc-connector \
+          ${{ steps.translate_inputs.outputs.service_account }} \
+          ${{ steps.translate_inputs.outputs.timeout }} \
+          ${{ steps.translate_inputs.outputs.memory }} \
+          ${{ steps.translate_inputs.outputs.retry }} \
+          ${{ steps.translate_inputs.outputs.env_vars }} \
+          ${{ steps.translate_inputs.outputs.labels }}
+      shell: bash
